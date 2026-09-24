@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+output/*.csv
+output/*.mp4
+video/conteo_pc1_grafica.mp4

@@ -1,6 +1,9 @@
-import cv2
+import argparse
 import csv
+import json
 from pathlib import Path
+
+import cv2
 
 from preprocessing import preprocess_motion
 from detector import detect_moving_objects
@@ -13,14 +16,15 @@ from counter import LineCounter
 
 BASE_DIR = Path(__file__).resolve().parent
 
-VIDEO_PATH = BASE_DIR / "video" / "video.mp4"
+OFFICIAL_VIDEO_PATH = BASE_DIR / "video" / "conteo_pc1_grafica.mp4"
 
-OUTPUT_DIR = BASE_DIR / "output"
+DEFAULT_VIDEO_PATH = (
+    OFFICIAL_VIDEO_PATH
+    if OFFICIAL_VIDEO_PATH.exists()
+    else BASE_DIR / "video" / "video.mp4"
+)
 
-EVENTS_PATH = OUTPUT_DIR / "eventos.csv"
-
-RESULT_VIDEO_PATH = OUTPUT_DIR / "video_resultado.mp4"
-
+DEFAULT_OUTPUT_DIR = BASE_DIR / "output"
 
 # Parámetros de detección.
 
@@ -30,6 +34,10 @@ MIN_AREA = 1200
 # Estabilización del video.
 
 USE_STABILIZATION = True
+
+STABILIZATION_WINDOW = 30
+
+STABILIZATION_BORDER_SCALE = 1.02
 
 
 # Parámetros del tracker.
@@ -55,13 +63,207 @@ MIN_SEEN_FRAMES = 5
 ENTRY_DIRECTION = "down"
 
 
+# Argumentos reproducibles en Windows y Ubuntu.
+
+def build_argument_parser():
+
+    parser = argparse.ArgumentParser(
+        description="Conteo de cruces de regiones móviles en un video."
+    )
+
+    parser.add_argument(
+        "--video",
+        type=Path,
+        default=DEFAULT_VIDEO_PATH,
+        help="Ruta del video de entrada."
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Carpeta para eventos.csv y video_resultado.mp4."
+    )
+
+    roi_group = parser.add_mutually_exclusive_group()
+
+    roi_group.add_argument(
+        "--roi",
+        nargs=4,
+        type=int,
+        metavar=("X", "Y", "W", "H"),
+        help="ROI guardada. Si se omite, se selecciona con el mouse."
+    )
+
+    roi_group.add_argument(
+        "--roi-file",
+        type=Path,
+        help=(
+            "Archivo JSON de ROI. Si no existe, permite seleccionarla y "
+            "la guarda; si existe, la reutiliza."
+        )
+    )
+
+    parser.add_argument(
+        "--select-roi-only",
+        action="store_true",
+        help="Selecciona/guarda la ROI y termina sin procesar el video."
+    )
+
+    parser.add_argument(
+        "--no-stabilization",
+        action="store_true",
+        help="Desactiva la estabilización para comparar resultados."
+    )
+
+    parser.add_argument(
+        "--no-display",
+        action="store_true",
+        help="No abre ventanas; requiere --roi o un --roi-file existente."
+    )
+
+    parser.add_argument(
+        "--stabilization-window",
+        type=int,
+        default=STABILIZATION_WINDOW,
+        help="Ventana equivalente del suavizado de trayectoria."
+    )
+
+    parser.add_argument(
+        "--border-scale",
+        type=float,
+        default=STABILIZATION_BORDER_SCALE,
+        help="Zoom entre 1.0 y 1.20 para ocultar bordes estabilizados."
+    )
+
+    parser.add_argument(
+        "--min-area",
+        type=int,
+        default=MIN_AREA,
+        help="Área mínima de una región móvil; evita editar main.py."
+    )
+
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        help="Detiene una prueba después de esta cantidad de frames."
+    )
+
+    return parser
+
+
+def load_roi(roi_path):
+
+    with roi_path.open("r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    try:
+        return tuple(
+            int(data[key])
+            for key in ("x", "y", "width", "height")
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"Formato de ROI inválido en {roi_path}"
+        ) from error
+
+
+def save_roi(roi_path, roi):
+
+    x, y, w, h = map(int, roi)
+    roi_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with roi_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "x": x,
+                "y": y,
+                "width": w,
+                "height": h
+            },
+            file,
+            indent=2
+        )
+        file.write("\n")
+
+
+def select_scaled_roi(frame, max_width=1200, max_height=800):
+    """Selecciona una ROI visible incluso si el video es vertical 1080x1920."""
+
+    height, width = frame.shape[:2]
+    scale = min(
+        1.0,
+        max_width / width,
+        max_height / height
+    )
+
+    if scale < 1.0:
+        preview = cv2.resize(
+            frame,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA
+        )
+    else:
+        preview = frame
+
+    preview_roi = cv2.selectROI(
+        "Seleccionar ROI",
+        preview,
+        showCrosshair=True,
+        fromCenter=False
+    )
+
+    if scale == 1.0:
+        return preview_roi
+
+    return tuple(
+        int(round(value / scale))
+        for value in preview_roi
+    )
+
+
 # Función principal.
 
 def main():
 
+    parser = build_argument_parser()
+    args = parser.parse_args()
+
+    if args.min_area <= 0:
+        parser.error("--min-area debe ser mayor que cero")
+
+    if args.max_frames is not None and args.max_frames <= 0:
+        parser.error("--max-frames debe ser mayor que cero")
+
+    roi_path = (
+        args.roi_file.expanduser().resolve()
+        if args.roi_file is not None
+        else None
+    )
+
+    has_saved_roi = roi_path is not None and roi_path.is_file()
+
+    if args.no_display and args.roi is None and not has_saved_roi:
+        parser.error(
+            "--no-display requiere --roi o un --roi-file existente"
+        )
+
+    if args.select_roi_only and args.no_display and not has_saved_roi:
+        parser.error(
+            "--select-roi-only necesita una ventana o un --roi-file existente"
+        )
+
+    video_path = args.video.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+    events_path = output_dir / "eventos.csv"
+    result_video_path = output_dir / "video_resultado.mp4"
+    use_stabilization = USE_STABILIZATION and not args.no_stabilization
+
     # Crea la carpeta de salida.
 
-    OUTPUT_DIR.mkdir(
+    output_dir.mkdir(
         parents=True,
         exist_ok=True
     )
@@ -70,14 +272,14 @@ def main():
     # Abre el video.
 
     cap = cv2.VideoCapture(
-        str(VIDEO_PATH)
+        str(video_path)
     )
 
 
     if not cap.isOpened():
 
         print("[ERROR] No se pudo abrir el video:")
-        print(VIDEO_PATH)
+        print(video_path)
 
         return
 
@@ -127,7 +329,7 @@ def main():
     print("======================================")
 
     print(
-        f"Ruta          : {VIDEO_PATH}"
+        f"Ruta          : {video_path}"
     )
 
     print(
@@ -147,11 +349,11 @@ def main():
     )
 
     print(
-        f"Estabilización: {USE_STABILIZATION}"
+        f"Estabilización: {use_stabilization}"
     )
 
     print(
-        f"Área mínima   : {MIN_AREA}"
+        f"Área mínima   : {args.min_area}"
     )
 
     print("======================================")
@@ -159,7 +361,10 @@ def main():
 
     # Crea el estabilizador.
 
-    stabilizer = VideoStabilizer()
+    stabilizer = VideoStabilizer(
+        smoothing_window=args.stabilization_window,
+        border_scale=args.border_scale
+    )
 
 
     # Crea el tracker.
@@ -188,7 +393,7 @@ def main():
 
     # Estabiliza el primer frame.
 
-    if USE_STABILIZATION:
+    if use_stabilization:
 
         first_frame = stabilizer.stabilize(
             first_frame
@@ -210,17 +415,28 @@ def main():
     print()
 
 
-    roi = cv2.selectROI(
-        "Seleccionar ROI",
-        first_frame,
-        showCrosshair=True,
-        fromCenter=False
-    )
+    if args.roi is not None:
 
+        roi = tuple(args.roi)
 
-    cv2.destroyWindow(
-        "Seleccionar ROI"
-    )
+    elif has_saved_roi:
+
+        try:
+            roi = load_roi(roi_path)
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            print(f"[ERROR] {error}")
+            cap.release()
+            return
+
+        print(f"[INFO] ROI cargada desde: {roi_path}")
+
+    else:
+
+        roi = select_scaled_roi(first_frame)
+
+        cv2.destroyWindow(
+            "Seleccionar ROI"
+        )
 
 
     x, y, w, h = map(
@@ -231,7 +447,14 @@ def main():
 
     # Verifica que la ROI sea válida.
 
-    if w == 0 or h == 0:
+    if (
+        w <= 0
+        or h <= 0
+        or x < 0
+        or y < 0
+        or x + w > width
+        or y + h > height
+    ):
 
         print(
             "[ERROR] ROI inválida."
@@ -245,6 +468,13 @@ def main():
 
 
     print("======================================")
+
+    if use_stabilization:
+
+        stabilizer.set_exclusion_roi(
+            (x, y, w, h),
+            first_frame.shape
+        )
     print(" ROI")
     print("======================================")
 
@@ -255,6 +485,18 @@ def main():
 
     print("======================================")
 
+    if roi_path is not None and not has_saved_roi:
+
+        save_roi(roi_path, (x, y, w, h))
+        print(f"[INFO] ROI guardada en: {roi_path}")
+
+    if args.select_roi_only:
+
+        cap.release()
+        cv2.destroyAllWindows()
+        print("[INFO] Selección de ROI finalizada.")
+        return
+
 
     # Prepara el video de salida.
 
@@ -264,7 +506,7 @@ def main():
 
 
     video_writer = cv2.VideoWriter(
-        str(RESULT_VIDEO_PATH),
+        str(result_video_path),
         fourcc,
         output_fps,
         (width, height)
@@ -287,7 +529,7 @@ def main():
 
     print(
         f"[INFO] Video de salida: "
-        f"{RESULT_VIDEO_PATH}"
+        f"{result_video_path}"
     )
 
 
@@ -335,6 +577,15 @@ def main():
 
     while True:
 
+        if (
+            args.max_frames is not None
+            and frame_number >= args.max_frames
+        ):
+            print(
+                f"[INFO] Prueba limitada a {args.max_frames} frames."
+            )
+            break
+
         # Lee el siguiente frame.
 
         ret, frame = cap.read()
@@ -351,6 +602,19 @@ def main():
 
         frame_number += 1
 
+        if args.no_display and frame_number % 300 == 0:
+
+            percentage = (
+                100.0 * frame_number / total_frames
+                if total_frames > 0
+                else 0.0
+            )
+
+            print(
+                f"[PROGRESO] Frame {frame_number}/{total_frames} "
+                f"({percentage:.1f} %)"
+            )
+
 
         # Guarda el frame original.
 
@@ -359,7 +623,7 @@ def main():
 
         # Estabiliza el frame.
 
-        if USE_STABILIZATION:
+        if use_stabilization:
 
             frame = stabilizer.stabilize(
                 frame
@@ -392,7 +656,7 @@ def main():
 
         detections = detect_moving_objects(
             dilated,
-            min_area=MIN_AREA
+            min_area=args.min_area
         )
 
 
@@ -690,7 +954,7 @@ def main():
 
         cv2.putText(
             frame,
-            f"Area minima: {MIN_AREA}",
+            f"Area minima: {args.min_area}",
             (20, 120),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -703,7 +967,7 @@ def main():
 
         stabilization_text = (
             "Estabilizacion: ON"
-            if USE_STABILIZATION
+            if use_stabilization
             else "Estabilizacion: OFF"
         )
 
@@ -719,12 +983,33 @@ def main():
         )
 
 
+        # Calidad de la estimación global de movimiento.
+
+        if use_stabilization:
+
+            stabilization_quality = stabilizer.diagnostics
+
+            cv2.putText(
+                frame,
+                (
+                    f"Puntos/inliers: "
+                    f"{stabilization_quality['tracked_points']}/"
+                    f"{stabilization_quality['inliers']}"
+                ),
+                (20, 175),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (0, 255, 0),
+                1
+            )
+
+
         # Muestra contadores.
 
         cv2.putText(
             frame,
             f"Entradas: {counter.entry_count}",
-            (20, 190),
+            (20, 205),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 0),
@@ -735,7 +1020,7 @@ def main():
         cv2.putText(
             frame,
             f"Salidas: {counter.exit_count}",
-            (20, 220),
+            (20, 235),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 255),
@@ -746,7 +1031,7 @@ def main():
         cv2.putText(
             frame,
             f"Total cruces: {counter.get_total()}",
-            (20, 250),
+            (20, 265),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (255, 0, 255),
@@ -763,22 +1048,24 @@ def main():
 
         # Muestra ventanas.
 
-        cv2.imshow(
-            "1 - Video original",
-            original_frame
-        )
+        if not args.no_display:
+
+            cv2.imshow(
+                "1 - Video original",
+                original_frame
+            )
 
 
-        cv2.imshow(
-            "2 - Sistema de Conteo",
-            frame
-        )
+            cv2.imshow(
+                "2 - Sistema de Conteo",
+                frame
+            )
 
 
-        cv2.imshow(
-            "3 - Movimiento dilatado",
-            dilated
-        )
+            cv2.imshow(
+                "3 - Movimiento dilatado",
+                dilated
+            )
 
 
         # Actualiza la ROI anterior.
@@ -790,10 +1077,14 @@ def main():
 
         # Controla la salida.
 
-        key = (
-            cv2.waitKey(1)
-            & 0xFF
-        )
+        key = -1
+
+        if not args.no_display:
+
+            key = (
+                cv2.waitKey(1)
+                & 0xFF
+            )
 
 
         if (
@@ -811,7 +1102,7 @@ def main():
     # Guarda eventos en CSV.
 
     with open(
-        EVENTS_PATH,
+        events_path,
         "w",
         newline="",
         encoding="utf-8"
@@ -865,11 +1156,11 @@ def main():
 
     print()
     print(
-        f"CSV          : {EVENTS_PATH}"
+        f"CSV          : {events_path}"
     )
 
     print(
-        f"Video final  : {RESULT_VIDEO_PATH}"
+        f"Video final  : {result_video_path}"
     )
 
     print("======================================")

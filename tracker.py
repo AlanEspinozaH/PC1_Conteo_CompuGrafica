@@ -34,6 +34,8 @@ class CentroidTracker:
 
         self.next_id += 1
 
+        return object_id
+
 
     # Elimina un objeto.
 
@@ -98,20 +100,26 @@ class CentroidTracker:
                         object_id
                     )
 
-            return self.objects
+            # Conserva las pistas internamente para recuperarlas si vuelven,
+            # pero no las reporta como visibles al contador.
+            return {}
 
 
         # Si aún no hay objetos, los registra.
 
         if len(self.objects) == 0:
 
+            visible_objects = {}
+
             for centroid in input_centroids:
 
-                self.register(
+                object_id = self.register(
                     centroid
                 )
 
-            return self.objects
+                visible_objects[object_id] = centroid
+
+            return visible_objects
 
 
         # Compara centroides previos con los nuevos.
@@ -127,63 +135,44 @@ class CentroidTracker:
 
         used_detections = set()
         used_objects = set()
+        visible_objects = {}
 
 
-        # Busca la coincidencia más cercana.
+        # Ordena globalmente las parejas por distancia. Así la asociación no
+        # depende del orden de los IDs cuando dos personas están cerca.
 
-        for object_index, old_centroid in enumerate(
-            object_centroids
-        ):
+        candidate_pairs = []
 
-            best_distance = float("inf")
-            best_detection = None
+        for object_index, old_centroid in enumerate(object_centroids):
 
+            for detection_index, new_centroid in enumerate(input_centroids):
 
-            for detection_index, new_centroid in enumerate(
-                input_centroids
-            ):
+                d = self.distance(old_centroid, new_centroid)
 
-                if detection_index in used_detections:
-                    continue
+                if d <= self.max_distance:
+                    candidate_pairs.append(
+                        (d, object_index, detection_index)
+                    )
 
+        candidate_pairs.sort(key=lambda pair: pair[0])
 
-                d = self.distance(
-                    old_centroid,
-                    new_centroid
-                )
+        for _, object_index, detection_index in candidate_pairs:
 
-
-                if d < best_distance:
-
-                    best_distance = d
-                    best_detection = detection_index
-
-
-            # Guarda la coincidencia si está dentro del rango.
+            object_id = object_ids[object_index]
 
             if (
-                best_detection is not None
-                and best_distance <= self.max_distance
+                object_id in used_objects
+                or detection_index in used_detections
             ):
+                continue
 
-                object_id = object_ids[
-                    object_index
-                ]
+            centroid = input_centroids[detection_index]
+            self.objects[object_id] = centroid
+            self.disappeared[object_id] = 0
+            visible_objects[object_id] = centroid
 
-                self.objects[object_id] = input_centroids[
-                    best_detection
-                ]
-
-                self.disappeared[object_id] = 0
-
-
-                used_detections.add(
-                    best_detection
-                )
-
-                used_objects.add(
-                    object_id
-                )
+            used_detections.add(detection_index)
+            used_objects.add(object_id)
 
 
         # Marca objetos que desaparecieron.
@@ -215,9 +204,11 @@ class CentroidTracker:
 
             if detection_index not in used_detections:
 
-                self.register(
+                object_id = self.register(
                     centroid
                 )
 
+                visible_objects[object_id] = centroid
 
-        return self.objects
+
+        return visible_objects
