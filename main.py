@@ -13,7 +13,7 @@ from counter import LineCounter
 
 BASE_DIR = Path(__file__).resolve().parent
 
-VIDEO_PATH = BASE_DIR / "video" / "video.mp4"
+VIDEO_PATH = BASE_DIR / "video" / "video2.mp4"
 
 OUTPUT_DIR = BASE_DIR / "output"
 
@@ -46,13 +46,7 @@ LINE_MARGIN = 10
 MIN_SEEN_FRAMES = 5
 
 
-# "down":
-# arriba -> abajo = ENTRADA
-#
-# "up":
-# abajo -> arriba = ENTRADA
-
-ENTRY_DIRECTION = "down"
+ENTRY_DIRECTION = "right"
 
 
 # Función principal.
@@ -293,13 +287,11 @@ def main():
 
     # Configura la línea de conteo.
 
-    # Línea horizontal en la mitad de la ROI
-
-    LINE_Y = h // 2
+    LINE_X = w // 2
 
 
     counter = LineCounter(
-        line_y=LINE_Y,
+        line_x=LINE_X,
         margin=LINE_MARGIN,
         min_seen_frames=MIN_SEEN_FRAMES,
         entry_direction=ENTRY_DIRECTION
@@ -307,7 +299,7 @@ def main():
 
 
     print(
-        f"[INFO] Línea de conteo Y: {LINE_Y}"
+        f"[INFO] Línea de conteo X: {LINE_X}"
     )
 
     print(
@@ -473,35 +465,22 @@ def main():
 
         # Dibuja la línea.
 
-        global_line_y = (
-            y + LINE_Y
-        )
-
+        global_line_x = x + LINE_X
 
         cv2.line(
             frame,
-            (
-                x,
-                global_line_y
-            ),
-            (
-                x + w,
-                global_line_y
-            ),
+            (global_line_x, y),
+            (global_line_x, y + h),
             (0, 0, 255),
             2
         )
-
 
         cv2.putText(
             frame,
             "LINEA DE CONTEO",
             (
-                x + 10,
-                max(
-                    global_line_y - 10,
-                    20
-                )
+                global_line_x + 10,
+                max(y + 20, 20)
             ),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,

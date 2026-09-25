@@ -2,14 +2,14 @@ class LineCounter:
 
     def __init__(
         self,
-        line_y,
+        line_x,
         margin=10,
         min_seen_frames=5,
-        entry_direction="down"
+        entry_direction="right"
     ):
 
         # Línea de conteo.
-        self.line_y = line_y
+        self.line_x = line_x
         self.margin = margin
 
         # Requiere varios frames para evitar falsos positivos.
@@ -36,13 +36,13 @@ class LineCounter:
     # DETERMINAR LADO DE LA LÍNEA
     
 
-    def get_side(self, cy):
+    def get_side(self, cx):
 
-        # Objeto arriba, abajo o dentro de la zona de tolerancia.
-        if cy < self.line_y - self.margin:
+        # Objeto a la izquierda, derecha o dentro de la zona de tolerancia.
+        if cx < self.line_x - self.margin:
             return -1
 
-        if cy > self.line_y + self.margin:
+        if cx > self.line_x + self.margin:
             return 1
 
         return 0
@@ -68,7 +68,7 @@ class LineCounter:
             self.seen_frames[object_id] += 1
 
             # Lado actual del objeto respecto a la línea.
-            current_side = self.get_side(cy)
+            current_side = self.get_side(cx)
 
             # Ignora si está en la zona neutral.
             if current_side == 0:
@@ -95,10 +95,10 @@ class LineCounter:
             movement = None
 
             if previous_side == -1 and current_side == 1:
-                movement = "down"
+                movement = "right"
 
             elif previous_side == 1 and current_side == -1:
-                movement = "up"
+                movement = "left"
 
             # Decide si fue entrada o salida.
             if movement is not None:
